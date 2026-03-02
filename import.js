@@ -279,6 +279,17 @@ function isOverloadErr(e) {
   return /429/.test(e?.message || '') || isNetworkErr(e);
 }
 
+// Simple fixed-concurrency runner over a list of items.
+async function runConcurrent(items, concurrency, fn) {
+  let i = 0;
+  await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, async () => {
+    while (i < items.length) {
+      const item = items[i++];
+      await fn(item);
+    }
+  }));
+}
+
 // Headers are always pre-written at run start; this just appends data rows.
 function appendRow(file, row) {
   const line = Object.values(row).map(v => {
@@ -574,6 +585,7 @@ ERROR: User '${CA_USER}' can see 0 objects in CollectiveAccess.
   const queue      = new AdaptiveQueue({ min: 1, max: maxConcurrency, initial: concurrency });
   const inProgress = new Set(); // item_ids currently mid-upload; guards concurrent duplicate rows
   let imported = 0, skippedNoObject = 0, skippedHasMedia = 0, errors = 0;
+  const importedItems = []; // { itemId, objectId } — for post-import verification
   progress = new ProgressBar(pending.length, () => queue.status);
 
   function logRow(item_id, image_id, status, reason, rep_id = '') {
@@ -642,6 +654,7 @@ ERROR: User '${CA_USER}' can see 0 objects in CollectiveAccess.
           const repId = res?.representation_id ?? res?.id ?? '?';
           log(`${idx} [OK] item_id=${row.item_id} "${row.title ?? ''}" → rep_id=${repId}`);
           imported++;
+          importedItems.push({ itemId: String(row.item_id), objectId: obj.objectId });
           done.add(row.item_id);
           // Update cache so any later row for this item_id sees mediaCount > 0 and skips
           objectCache.set(itemKey, { objectId: obj.objectId, mediaCount: 1 });
@@ -676,6 +689,44 @@ ERROR: User '${CA_USER}' can see 0 objects in CollectiveAccess.
 
   if (done.size === rows.length) {
     if (fs.existsSync(progressFile)) fs.unlinkSync(progressFile);
+  }
+
+  // ── Post-import verification ──
+  // Re-fetch every item imported in this run (bypasses objectCache) and confirm
+  // each has exactly one representation. Reports [MISSING] or [DUPLICATE] if not.
+  if (importedItems.length > 0) {
+    log(`\nVerifying ${importedItems.length} imported item(s)...`);
+    const anomalies = [];
+    let verified = 0;
+
+    await runConcurrent(importedItems, 10, async ({ itemId, objectId }) => {
+      try {
+        const url = new URL(`item/ca_objects/id/${objectId}`, CA_BASE_URL);
+        url.searchParams.set('authToken', token);
+        const data = await withTokenRefresh(() => caFetch(url.toString()));
+        const count = countReps(data?.representations ?? {});
+        if (count !== 1) anomalies.push({ itemId, objectId, count });
+      } catch (e) {
+        anomalies.push({ itemId, objectId, count: -1, error: e.message });
+      }
+      verified++;
+      if (verified % 50 === 0) log(`  verified ${verified}/${importedItems.length}...`);
+    });
+
+    if (anomalies.length === 0) {
+      log(`Verification OK : all ${importedItems.length} items have exactly 1 representation`);
+    } else {
+      log(`Verification issues (${anomalies.length}):`);
+      for (const { itemId, objectId, count, error } of anomalies) {
+        if (error) {
+          log(`  [ERROR]     item_id=${itemId} (object_id=${objectId}) — ${error}`);
+        } else if (count === 0) {
+          log(`  [MISSING]   item_id=${itemId} (object_id=${objectId}) — 0 representations`);
+        } else {
+          log(`  [DUPLICATE] item_id=${itemId} (object_id=${objectId}) — ${count} representations`);
+        }
+      }
+    }
   }
 }
 
