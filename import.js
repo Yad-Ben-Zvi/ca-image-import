@@ -147,6 +147,12 @@ class ProgressBar {
 // Ramp-up  (+1): after 5 consecutive successes AND rolling avg time ≤ 1.5× baseline
 // Back-off (÷2): on HTTP 429/5xx, network error, OR single response > 2× baseline
 // Retry        : overload failures are re-queued with a 5s delay (not failed to CSV)
+//
+// Tasks that resolve with SKIP_TIMING count as successes for ramp-up purposes
+// but do NOT feed the response-time baseline. This prevents fast skips (object
+// not found / already has media) from polluting the baseline and causing
+// spurious back-offs when the first real import runs.
+const SKIP_TIMING = Symbol('skip-timing');
 
 class AdaptiveQueue {
   constructor({ min = 1, max = 5, initial = 2 } = {}) {
@@ -189,10 +195,11 @@ class AdaptiveQueue {
   }
 
   _onSuccess(ms) {
-    this._recordTime(ms);
+    // ms is null for skipped rows — count the success but don't affect timing
+    if (ms !== null) this._recordTime(ms);
     this.successes++;
     // Ramp up if: 5 consecutive successes, room to grow, and avg time is healthy
-    const suppressed = this._baseline !== null && this._avgTime() > this._baseline * 1.5;
+    const suppressed = ms !== null && this._baseline !== null && this._avgTime() > this._baseline * 1.5;
     if (this.successes >= 5 && this.concurrency < this.max && !suppressed) {
       this.concurrency++;
       this.direction = '↑';
@@ -216,11 +223,13 @@ class AdaptiveQueue {
     fn().then(
       result => {
         const ms = Date.now() - start;
-        // Single response >2× baseline → back off but still accept the result
-        if (this._baseline !== null && ms > this._baseline * 2) {
+        const timed = result !== SKIP_TIMING;
+        // Single response >2× baseline → back off but still accept the result.
+        // Skips are excluded: their fast completion must not corrupt the baseline.
+        if (timed && this._baseline !== null && ms > this._baseline * 2) {
           this._backOff();
         } else {
-          this._onSuccess(ms);
+          this._onSuccess(timed ? ms : null);
         }
         this.active--;
         this._drain();
@@ -599,7 +608,7 @@ ERROR: User '${CA_USER}' can see 0 objects in CollectiveAccess.
           skippedNoObject++;
           logRow(row.item_id, row.image_id, 'skipped', 'object not found in CA');
           progress.skip();
-          return;
+          return SKIP_TIMING;
         }
 
         // ── 2. Skip if already has media ──
@@ -610,7 +619,7 @@ ERROR: User '${CA_USER}' can see 0 objects in CollectiveAccess.
           logRow(row.item_id, row.image_id, 'skipped', `already has ${obj.mediaCount} image(s)`);
           if (n % 50 === 0) saveProgress(progressFile, done);
           progress.skip();
-          return;
+          return SKIP_TIMING;
         }
 
         // ── 3. Attach the image ──
