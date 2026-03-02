@@ -78,13 +78,24 @@ class ProgressBar {
   constructor(total, getConcStatus) {
     this.total          = total;
     this.processed      = 0;
+    this.worked         = 0;   // rows where actual API work was attempted (not skipped)
     this.startTime      = null;
     this.tty            = !!process.stdout.isTTY;
     this.width          = Math.max(20, Math.min(40, (process.stdout.columns || 80) - 60));
     this.getConcStatus  = getConcStatus || null;
   }
 
+  // Called when real work was attempted (createRep or fetch error) — counts for timing.
   tick() {
+    if (this.startTime === null) this.startTime = Date.now();
+    this.processed++;
+    this.worked++;
+    if (this.tty) this._draw();
+  }
+
+  // Called for skipped rows (not found / already has media) — advances the bar but
+  // does not affect the average time or ETA calculation.
+  skip() {
     if (this.startTime === null) this.startTime = Date.now();
     this.processed++;
     if (this.tty) this._draw();
@@ -104,11 +115,13 @@ class ProgressBar {
     const pct     = this.total > 0 ? this.processed / this.total : 0;
     const filled  = Math.round(this.width * pct);
     const bar     = '█'.repeat(filled) + '░'.repeat(this.width - filled);
-    const elapsed = this.startTime ? (Date.now() - this.startTime) / 1000 : 0;
-    const avg     = this.processed > 0 ? elapsed / this.processed : 0;
-    const eta     = avg * (this.total - this.processed);
-    const avgStr  = avg > 0 ? `${avg.toFixed(1)}s/row` : '  -  ';
-    const etaStr  = eta > 0 ? this._fmt(eta) : '--:--';
+    const elapsed    = this.startTime ? (Date.now() - this.startTime) / 1000 : 0;
+    const avg        = this.worked > 0 ? elapsed / this.worked : 0;
+    // Weight ETA by the observed ratio of worked vs total rows so skips shrink it correctly
+    const workedRatio = this.processed > 0 ? this.worked / this.processed : 1;
+    const eta        = avg * (this.total - this.processed) * workedRatio;
+    const avgStr     = avg > 0 ? `${avg.toFixed(1)}s/row` : '  -  ';
+    const etaStr     = eta > 0 ? this._fmt(eta) : '--:--';
     let line = `\r\x1b[K[${bar}] ${this.processed}/${this.total} (${Math.round(pct * 100)}%) | ${avgStr} | ETA ${etaStr}`;
     if (this.getConcStatus) {
       const { concurrency, direction } = this.getConcStatus();
@@ -585,7 +598,7 @@ ERROR: User '${CA_USER}' can see 0 objects in CollectiveAccess.
           log(`${idx} [SKIP] item_id=${row.item_id} — object not found in CA`);
           skippedNoObject++;
           logRow(row.item_id, row.image_id, 'skipped', 'object not found in CA');
-          progress.tick();
+          progress.skip();
           return;
         }
 
@@ -596,7 +609,7 @@ ERROR: User '${CA_USER}' can see 0 objects in CollectiveAccess.
           done.add(row.item_id);
           logRow(row.item_id, row.image_id, 'skipped', `already has ${obj.mediaCount} image(s)`);
           if (n % 50 === 0) saveProgress(progressFile, done);
-          progress.tick();
+          progress.skip();
           return;
         }
 
