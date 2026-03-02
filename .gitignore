@@ -1,0 +1,8 @@
+node_modules/
+.env
+.env.*
+!.env.example
+import.progress.json
+import.log.csv
+import.failed.csv
+npm-debug.log*
