@@ -571,7 +571,8 @@ ERROR: User '${CA_USER}' can see 0 objects in CollectiveAccess.
   });
 
   // ── Process rows ──
-  const queue = new AdaptiveQueue({ min: 1, max: maxConcurrency, initial: concurrency });
+  const queue      = new AdaptiveQueue({ min: 1, max: maxConcurrency, initial: concurrency });
+  const inProgress = new Set(); // item_ids currently mid-upload; guards concurrent duplicate rows
   let imported = 0, skippedNoObject = 0, skippedHasMedia = 0, errors = 0;
   progress = new ProgressBar(pending.length, () => queue.status);
 
@@ -623,6 +624,17 @@ ERROR: User '${CA_USER}' can see 0 objects in CollectiveAccess.
         }
 
         // ── 3. Attach the image ──
+        // Guard against the same item_id appearing twice in the CSV (concurrent or sequential).
+        // The check+add is synchronous so no concurrent task can slip through between them.
+        const itemKey = String(row.item_id);
+        if (inProgress.has(itemKey)) {
+          log(`${idx} [SKIP] item_id=${row.item_id} — duplicate row, upload already in progress`);
+          skippedHasMedia++;
+          logRow(row.item_id, row.image_id, 'skipped', 'duplicate row');
+          progress.skip();
+          return SKIP_TIMING;
+        }
+        inProgress.add(itemKey);
         try {
           const res = await withTokenRefresh(() =>
             createRep(CA_BASE_URL, token, CA_LOCALE, REL_TYPE_ID, obj.objectId, row)
@@ -631,15 +643,19 @@ ERROR: User '${CA_USER}' can see 0 objects in CollectiveAccess.
           log(`${idx} [OK] item_id=${row.item_id} "${row.title ?? ''}" → rep_id=${repId}`);
           imported++;
           done.add(row.item_id);
+          // Update cache so any later row for this item_id sees mediaCount > 0 and skips
+          objectCache.set(itemKey, { objectId: obj.objectId, mediaCount: 1 });
           logRow(row.item_id, row.image_id, 'imported', '', repId);
           if (n % 50 === 0) saveProgress(progressFile, done);
         } catch (e) {
+          inProgress.delete(itemKey); // release before re-queue so retry can re-enter
           if (isOverloadErr(e)) { verbose(`${idx} [RETRY] create overload: ${e.message.slice(0, 80)}`); throw e; }
           warn(`${idx} [ERR] item_id=${row.item_id} → ${e.message}`);
           errors++;
           logRow(row.item_id, row.image_id, 'error', e.message);
           writeFailed(row);
         }
+        inProgress.delete(itemKey);
         progress.tick();
       });
     })
