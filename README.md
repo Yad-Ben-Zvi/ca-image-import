@@ -105,6 +105,7 @@ When running in an interactive terminal the script shows a live progress bar:
 ```
 
 - ETA is `HH:MM:SS`
+- `s/row` and ETA are based only on rows where actual work was attempted — skipped rows (object not found / already has media) are excluded so they don't distort the timing
 - `conc=N` shows the current concurrency level
 - `↑` / `↓` indicates the last adjustment direction
 
