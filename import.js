@@ -116,13 +116,13 @@ class ProgressBar {
     const filled  = Math.round(this.width * pct);
     const bar     = '█'.repeat(filled) + '░'.repeat(this.width - filled);
     const elapsed    = this.startTime ? (Date.now() - this.startTime) / 1000 : 0;
-    const avg        = this.worked > 0 ? elapsed / this.worked : 0;
-    // Weight ETA by the observed ratio of worked vs total rows so skips shrink it correctly
-    const workedRatio = this.processed > 0 ? this.worked / this.processed : 1;
-    const eta        = avg * (this.total - this.processed) * workedRatio;
-    const avgStr     = avg > 0 ? `${avg.toFixed(1)}s/row` : '  -  ';
+    // rows/min reflects actual wall-clock throughput and scales with concurrency.
+    // Using all processed rows (skips + imports) keeps ETA stable and accurate.
+    const rpm        = elapsed > 0 && this.processed > 0 ? (this.processed / elapsed) * 60 : 0;
+    const eta        = rpm > 0 ? (this.total - this.processed) / rpm * 60 : 0;
+    const rateStr    = rpm > 0 ? `${rpm.toFixed(1)}/min` : '  -  ';
     const etaStr     = eta > 0 ? this._fmt(eta) : '--:--';
-    let line = `\r\x1b[K[${bar}] ${this.processed}/${this.total} (${Math.round(pct * 100)}%) | ${avgStr} | ETA ${etaStr}`;
+    let line = `\r\x1b[K[${bar}] ${this.processed}/${this.total} (${Math.round(pct * 100)}%) | ${rateStr} | ETA ${etaStr}`;
     if (this.getConcStatus) {
       const { concurrency, direction } = this.getConcStatus();
       line += ` | conc=${concurrency}${direction}`;

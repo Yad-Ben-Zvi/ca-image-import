@@ -101,11 +101,11 @@ All output files are written next to the input CSV.
 When running in an interactive terminal the script shows a live progress bar:
 
 ```
-[████████████░░░░░░░░░░░░░░░░░░░░] 400/3091 (13%) | 1.3s/row | ETA 00:44:12 | conc=3↑
+[████████████░░░░░░░░░░░░░░░░░░░░] 400/3091 (13%) | 3.2/min | ETA 00:44:12 | conc=3↑
 ```
 
 - ETA is `HH:MM:SS`
-- `s/row` and ETA are based only on rows where actual work was attempted — skipped rows (object not found / already has media) are excluded so they don't distort the timing
+- Rate is shown as rows per minute (`/min`), which reflects actual wall-clock throughput and scales naturally with concurrency — at conc=2 you see roughly 2× the rate of conc=1
 - `conc=N` shows the current concurrency level
 - `↑` / `↓` indicates the last adjustment direction
 
