@@ -35,11 +35,10 @@
  *
  * ADAPTIVE CONCURRENCY:
  *   The queue starts at --concurrency and adjusts between 1 and --max-concurrency
- *   automatically. It ramps up (+1) after 5 consecutive successes when average
- *   response time is healthy, and backs off (÷2) on HTTP 429/5xx, network errors,
- *   or when a single request takes >2× the rolling baseline. Failed rows caused by
- *   server overload are re-queued with a 5-second delay and not written to
- *   import.failed.csv — they will be retried automatically.
+ *   automatically. It ramps up (+1) after 5 consecutive successes, and backs off
+ *   (÷2) on HTTP 429/5xx or network errors. Failed rows caused by server overload
+ *   are re-queued with a 5-second delay and not written to import.failed.csv —
+ *   they will be retried automatically.
  *
  * SKIP LOGIC:
  *   A row is skipped if the target object already has one or more representations
@@ -144,15 +143,9 @@ class ProgressBar {
 // AIMD (Additive Increase, Multiplicative Decrease) — the same algorithm TCP
 // uses for congestion control.
 //
-// Ramp-up  (+1): after 5 consecutive successes AND rolling avg time ≤ 1.5× baseline
-// Back-off (÷2): on HTTP 429/5xx, network error, OR single response > 2× baseline
+// Ramp-up  (+1): after 5 consecutive successes (no overload errors)
+// Back-off (÷2): on HTTP 429/5xx or network error
 // Retry        : overload failures are re-queued with a 5s delay (not failed to CSV)
-//
-// Tasks that resolve with SKIP_TIMING count as successes for ramp-up purposes
-// but do NOT feed the response-time baseline. This prevents fast skips (object
-// not found / already has media) from polluting the baseline and causing
-// spurious back-offs when the first real import runs.
-const SKIP_TIMING = Symbol('skip-timing');
 
 class AdaptiveQueue {
   constructor({ min = 1, max = 5, initial = 2 } = {}) {
@@ -163,9 +156,6 @@ class AdaptiveQueue {
     this.queue       = [];
     this.successes   = 0;   // consecutive success counter for ramp-up
     this.direction   = '';  // last adjustment: '↑' | '↓' | ''
-    this._times      = [];  // rolling window of recent response times (ms)
-    this._baseline   = null;
-    this._WINDOW     = 20;  // rolling window size; also the number of rows needed to set baseline
   }
 
   get status() {
@@ -174,33 +164,16 @@ class AdaptiveQueue {
 
   // ── Internal helpers ──────────────────────────────────────────────────────
 
-  _recordTime(ms) {
-    this._times.push(ms);
-    if (this._times.length > this._WINDOW) this._times.shift();
-    // Establish baseline once we have a full window of observations
-    if (this._baseline === null && this._times.length >= this._WINDOW) {
-      this._baseline = this._times.reduce((a, b) => a + b, 0) / this._times.length;
-    }
-  }
-
-  _avgTime() {
-    if (!this._times.length) return 0;
-    return this._times.reduce((a, b) => a + b, 0) / this._times.length;
-  }
-
   _backOff() {
     this.successes = 0;
     this.concurrency = Math.max(this.min, Math.floor(this.concurrency / 2));
     this.direction = '↓';
   }
 
-  _onSuccess(ms) {
-    // ms is null for skipped rows — count the success but don't affect timing
-    if (ms !== null) this._recordTime(ms);
+  _onSuccess() {
     this.successes++;
-    // Ramp up if: 5 consecutive successes, room to grow, and avg time is healthy
-    const suppressed = ms !== null && this._baseline !== null && this._avgTime() > this._baseline * 1.5;
-    if (this.successes >= 5 && this.concurrency < this.max && !suppressed) {
+    // Ramp up after 5 consecutive successes (no overload errors)
+    if (this.successes >= 5 && this.concurrency < this.max) {
       this.concurrency++;
       this.direction = '↑';
       this.successes = 0;
@@ -219,18 +192,9 @@ class AdaptiveQueue {
   }
 
   _execute({ fn, resolve, reject }) {
-    const start = Date.now();
     fn().then(
       result => {
-        const ms = Date.now() - start;
-        const timed = result !== SKIP_TIMING;
-        // Single response >2× baseline → back off but still accept the result.
-        // Skips are excluded: their fast completion must not corrupt the baseline.
-        if (timed && this._baseline !== null && ms > this._baseline * 2) {
-          this._backOff();
-        } else {
-          this._onSuccess(timed ? ms : null);
-        }
+        this._onSuccess();
         this.active--;
         this._drain();
         resolve(result);
@@ -621,7 +585,7 @@ ERROR: User '${CA_USER}' can see 0 objects in CollectiveAccess.
           skippedNoObject++;
           logRow(row.item_id, row.image_id, 'skipped', 'object not found in CA');
           progress.skip();
-          return SKIP_TIMING;
+          return;
         }
 
         // ── 2. Skip if already has media ──
@@ -632,7 +596,7 @@ ERROR: User '${CA_USER}' can see 0 objects in CollectiveAccess.
           logRow(row.item_id, row.image_id, 'skipped', `already has ${obj.mediaCount} image(s)`);
           if (n % 50 === 0) saveProgress(progressFile, done);
           progress.skip();
-          return SKIP_TIMING;
+          return;
         }
 
         // ── 3. Attach the image ──
@@ -644,7 +608,7 @@ ERROR: User '${CA_USER}' can see 0 objects in CollectiveAccess.
           skippedHasMedia++;
           logRow(row.item_id, row.image_id, 'skipped', 'duplicate row');
           progress.skip();
-          return SKIP_TIMING;
+          return;
         }
         inProgress.add(itemKey);
         try {

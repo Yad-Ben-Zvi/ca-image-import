@@ -117,10 +117,8 @@ The queue starts at `--concurrency` (default 2) and adjusts automatically betwee
 
 | Signal | Action |
 |--------|--------|
-| 5 consecutive successes with healthy response time | +1 concurrency |
-| Rolling avg response time > 1.5× baseline | Suppress ramp-up |
+| 5 consecutive successes | +1 concurrency |
 | HTTP 429 / 5xx / network error | Halve concurrency, re-queue row with 5s delay |
-| Single response time > 2× baseline | Halve concurrency (row still counts as success) |
 
 Rows that hit overload errors are **re-queued automatically** with a 5-second delay and are never written to `import.failed.csv`. Only permanent errors (bad CA data, wrong path, etc.) go to the failed file.
 
