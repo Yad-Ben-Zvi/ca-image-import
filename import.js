@@ -327,7 +327,7 @@ async function caFetch(url, options = {}) {
   if (options.body) verbose('body:', String(options.body).slice(0, 400));
 
   const controller = new AbortController();
-  const timeout = options.method === 'PUT' ? 180_000 : 60_000; // PUTs need longer — server processes image
+  const timeout = options.method === 'PUT' ? 300_000 : 60_000; // PUTs need longer — server processes image
   const timer = setTimeout(() => controller.abort(), timeout);
   let res;
   try {
